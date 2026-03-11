@@ -17250,6 +17250,478 @@ def get_alternative_tools():
         logger.error(f"Error getting alternative tools: {str(e)}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
+# ============================================================================
+# OSINT TARGET MANAGEMENT & LOOKUP ENGINE (v7.0)
+# ============================================================================
+
+import uuid
+
+class OSINTTargetManager:
+    """Manages OSINT target entities stored in osint_targets.json"""
+
+    def __init__(self, data_file: str = None):
+        if data_file is None:
+            data_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "osint_targets.json")
+        self.data_file = data_file
+        self._ensure_data_file()
+
+    def _ensure_data_file(self):
+        """Create data file if it doesn't exist"""
+        if not os.path.exists(self.data_file):
+            data = {
+                "targets": [],
+                "metadata": {
+                    "version": "1.0",
+                    "created_at": datetime.now().isoformat(),
+                    "last_updated": datetime.now().isoformat()
+                }
+            }
+            with open(self.data_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+
+    def _load(self) -> Dict[str, Any]:
+        with open(self.data_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _save(self, data: Dict[str, Any]):
+        data["metadata"]["last_updated"] = datetime.now().isoformat()
+        with open(self.data_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    def add_target(self, name: str, phone: str = "", email: str = "",
+                   aliases: list = None, notes: str = "", category: str = "person") -> Dict[str, Any]:
+        """Add a new OSINT target entity"""
+        data = self._load()
+        target_id = str(uuid.uuid4())
+        target = {
+            "id": target_id,
+            "name": name,
+            "phone": phone,
+            "email": email,
+            "aliases": aliases or [],
+            "notes": notes,
+            "category": category,
+            "created_at": datetime.now().isoformat(),
+            "last_lookup": None,
+            "lookup_results": {}
+        }
+        data["targets"].append(target)
+        self._save(data)
+        logger.info(f"🎯 OSINT target added: {name} (ID: {target_id})")
+        return target
+
+    def list_targets(self) -> list:
+        """List all OSINT targets"""
+        data = self._load()
+        return data["targets"]
+
+    def get_target(self, target_id: str) -> Optional[Dict[str, Any]]:
+        """Get a specific target by ID"""
+        data = self._load()
+        for t in data["targets"]:
+            if t["id"] == target_id:
+                return t
+        return None
+
+    def get_target_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get a target by name (case-insensitive)"""
+        data = self._load()
+        for t in data["targets"]:
+            if t["name"].lower() == name.lower():
+                return t
+        return None
+
+    def update_target(self, target_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Update a target's fields"""
+        data = self._load()
+        for i, t in enumerate(data["targets"]):
+            if t["id"] == target_id:
+                for key, val in updates.items():
+                    if key in t and key not in ("id", "created_at"):
+                        data["targets"][i][key] = val
+                self._save(data)
+                return data["targets"][i]
+        return None
+
+    def update_lookup_results(self, target_id: str, results: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Store lookup results for a target"""
+        data = self._load()
+        for i, t in enumerate(data["targets"]):
+            if t["id"] == target_id:
+                data["targets"][i]["lookup_results"] = results
+                data["targets"][i]["last_lookup"] = datetime.now().isoformat()
+                self._save(data)
+                return data["targets"][i]
+        return None
+
+    def delete_target(self, target_id: str) -> bool:
+        """Delete a target by ID"""
+        data = self._load()
+        original_len = len(data["targets"])
+        data["targets"] = [t for t in data["targets"] if t["id"] != target_id]
+        if len(data["targets"]) < original_len:
+            self._save(data)
+            return True
+        return False
+
+
+class OSINTLookupEngine:
+    """Passive OSINT reconnaissance engine for people, phones, organizations"""
+
+    # Known Irish mobile prefixes
+    IRISH_MOBILE_PREFIXES = {
+        "083": "Three Ireland",
+        "085": "Eir Mobile",
+        "086": "Vodafone Ireland",
+        "087": "Vodafone Ireland",
+        "089": "Three Ireland",
+    }
+
+    # Social media platforms for username probing
+    SOCIAL_PLATFORMS = {
+        "linkedin": "https://www.linkedin.com/in/{username}",
+        "facebook": "https://www.facebook.com/{username}",
+        "instagram": "https://www.instagram.com/{username}",
+        "twitter_x": "https://x.com/{username}",
+        "github": "https://github.com/{username}",
+        "tiktok": "https://www.tiktok.com/@{username}",
+        "youtube": "https://www.youtube.com/@{username}",
+        "reddit": "https://www.reddit.com/user/{username}",
+        "pinterest": "https://www.pinterest.com/{username}",
+    }
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+
+    def analyze_phone(self, phone: str) -> Dict[str, Any]:
+        """Analyze a phone number for country, carrier, and format intelligence"""
+        result = {
+            "raw_number": phone,
+            "normalized": phone.strip().replace(" ", "").replace("-", ""),
+            "country": "Unknown",
+            "country_code": "",
+            "carrier_guess": "Unknown",
+            "number_type": "Unknown",
+            "format_analysis": {},
+            "possible_formats": [],
+            "osint_queries": []
+        }
+
+        normalized = result["normalized"]
+
+        # Irish number detection
+        if normalized.startswith("0") and len(normalized) >= 10:
+            prefix3 = normalized[:3]
+            if prefix3 in self.IRISH_MOBILE_PREFIXES:
+                result["country"] = "Ireland"
+                result["country_code"] = "+353"
+                result["carrier_guess"] = self.IRISH_MOBILE_PREFIXES[prefix3]
+                result["number_type"] = "Mobile"
+                # International format
+                intl = "+353" + normalized[1:]
+                result["possible_formats"] = [
+                    normalized,
+                    intl,
+                    "00353" + normalized[1:],
+                    f"({prefix3}) {normalized[3:6]} {normalized[6:]}"
+                ]
+            elif normalized.startswith("01"):
+                result["country"] = "Ireland"
+                result["country_code"] = "+353"
+                result["carrier_guess"] = "Landline (Dublin area)"
+                result["number_type"] = "Landline"
+                intl = "+353" + normalized[1:]
+                result["possible_formats"] = [normalized, intl]
+
+        # If starts with + or 00, try to detect country
+        elif normalized.startswith("+353") or normalized.startswith("00353"):
+            result["country"] = "Ireland"
+            result["country_code"] = "+353"
+            local = "0" + normalized.replace("+353", "").replace("00353", "")
+            prefix3 = local[:3]
+            if prefix3 in self.IRISH_MOBILE_PREFIXES:
+                result["carrier_guess"] = self.IRISH_MOBILE_PREFIXES[prefix3]
+                result["number_type"] = "Mobile"
+            result["possible_formats"] = [normalized, local]
+
+        elif normalized.startswith("+44") or normalized.startswith("0044"):
+            result["country"] = "United Kingdom"
+            result["country_code"] = "+44"
+            result["number_type"] = "Mobile" if any(normalized.replace("+44", "0").startswith(p) for p in ["07"]) else "Unknown"
+
+        elif normalized.startswith("+1") or normalized.startswith("001"):
+            result["country"] = "United States / Canada"
+            result["country_code"] = "+1"
+
+        # Generate OSINT search queries
+        for fmt in result["possible_formats"] or [normalized]:
+            result["osint_queries"].extend([
+                f'"{fmt}"',
+                f'"{fmt}" site:facebook.com',
+                f'"{fmt}" site:linkedin.com',
+                f'"{fmt}" site:truecaller.com',
+                f'"{fmt}" site:whocallsme.com',
+            ])
+
+        result["format_analysis"] = {
+            "length": len(normalized),
+            "starts_with_plus": normalized.startswith("+"),
+            "starts_with_zero": normalized.startswith("0"),
+            "all_digits": normalized.lstrip("+").isdigit()
+        }
+
+        return result
+
+    def generate_usernames(self, name: str) -> list:
+        """Generate possible usernames from a person's name"""
+        parts = name.strip().lower().split()
+        if len(parts) < 2:
+            return [name.lower().replace(" ", "")]
+
+        first = parts[0]
+        last = parts[-1]
+        middle = parts[1:-1] if len(parts) > 2 else []
+
+        usernames = [
+            f"{first}{last}",
+            f"{first}.{last}",
+            f"{first}_{last}",
+            f"{first}-{last}",
+            f"{last}{first}",
+            f"{last}.{first}",
+            f"{first[0]}{last}",
+            f"{first}{last[0]}",
+            f"{first[0]}.{last}",
+            f"{last}{first[0]}",
+            f"{first}{last}1",
+            f"{first}.{last}1",
+        ]
+
+        # Add middle name variations
+        for m in middle:
+            usernames.append(f"{first}{m[0]}{last}")
+            usernames.append(f"{first}.{m[0]}.{last}")
+
+        return list(dict.fromkeys(usernames))  # deduplicate while preserving order
+
+    def probe_social_media(self, name: str) -> Dict[str, Any]:
+        """Generate social media profile URLs and probe availability"""
+        usernames = self.generate_usernames(name)
+        results = {
+            "generated_usernames": usernames,
+            "platform_urls": {},
+            "probed_results": [],
+            "google_dorks": []
+        }
+
+        # Generate URLs for each platform
+        for platform, url_template in self.SOCIAL_PLATFORMS.items():
+            platform_urls = []
+            for username in usernames[:5]:  # Top 5 usernames per platform
+                platform_urls.append(url_template.format(username=username))
+            results["platform_urls"][platform] = platform_urls
+
+        # Probe top candidates via HTTP HEAD (non-intrusive)
+        primary_username = usernames[0] if usernames else name.lower().replace(" ", "")
+        for platform, url_template in self.SOCIAL_PLATFORMS.items():
+            url = url_template.format(username=primary_username)
+            probe_result = {"platform": platform, "url": url, "username": primary_username, "status": "unknown"}
+            try:
+                resp = self.session.head(url, timeout=5, allow_redirects=True)
+                probe_result["http_status"] = resp.status_code
+                if resp.status_code == 200:
+                    probe_result["status"] = "possibly_exists"
+                elif resp.status_code == 404:
+                    probe_result["status"] = "not_found"
+                elif resp.status_code in (301, 302, 303):
+                    probe_result["status"] = "redirect"
+                    probe_result["redirect_url"] = resp.headers.get("Location", "")
+                else:
+                    probe_result["status"] = f"http_{resp.status_code}"
+            except requests.exceptions.Timeout:
+                probe_result["status"] = "timeout"
+            except requests.exceptions.ConnectionError:
+                probe_result["status"] = "connection_error"
+            except Exception as e:
+                probe_result["status"] = f"error: {str(e)[:50]}"
+
+            results["probed_results"].append(probe_result)
+
+        # Generate Google dorks for deeper investigation
+        results["google_dorks"] = [
+            f'"{name}"',
+            f'"{name}" site:linkedin.com',
+            f'"{name}" site:facebook.com',
+            f'"{name}" site:instagram.com',
+            f'"{name}" site:twitter.com OR site:x.com',
+            f'"{name}" site:github.com',
+            f'"{name}" email',
+            f'"{name}" resume OR CV',
+            f'"{name}" phone OR contact',
+            f'intext:"{name}" filetype:pdf',
+            f'intext:"{name}" filetype:doc OR filetype:docx',
+        ]
+
+        return results
+
+    def full_lookup(self, name: str = "", phone: str = "") -> Dict[str, Any]:
+        """Run a comprehensive OSINT lookup combining all techniques"""
+        logger.info(f"🔍 Running full OSINT lookup: name='{name}', phone='{phone}'")
+
+        profile = {
+            "lookup_timestamp": datetime.now().isoformat(),
+            "subject": {
+                "name": name,
+                "phone": phone
+            },
+            "phone_intelligence": {},
+            "social_media_intelligence": {},
+            "combined_osint_queries": [],
+            "risk_indicators": [],
+            "summary": ""
+        }
+
+        # Phone analysis
+        if phone:
+            profile["phone_intelligence"] = self.analyze_phone(phone)
+            profile["combined_osint_queries"].extend(
+                profile["phone_intelligence"].get("osint_queries", [])
+            )
+
+        # Social media / name analysis
+        if name:
+            profile["social_media_intelligence"] = self.probe_social_media(name)
+            profile["combined_osint_queries"].extend(
+                profile["social_media_intelligence"].get("google_dorks", [])
+            )
+
+        # Cross-reference queries (name + phone together)
+        if name and phone:
+            profile["combined_osint_queries"].extend([
+                f'"{name}" "{phone}"',
+                f'"{name}" "{profile["phone_intelligence"].get("possible_formats", [phone])[0]}"',
+            ])
+
+        # Generate summary
+        found_platforms = [
+            r["platform"] for r in profile["social_media_intelligence"].get("probed_results", [])
+            if r.get("status") == "possibly_exists"
+        ]
+        country = profile["phone_intelligence"].get("country", "Unknown")
+        carrier = profile["phone_intelligence"].get("carrier_guess", "Unknown")
+
+        summary_parts = [f"OSINT Profile for: {name or 'Unknown'} | Phone: {phone or 'N/A'}"]
+        if country != "Unknown":
+            summary_parts.append(f"Phone origin: {country} ({carrier})")
+        if found_platforms:
+            summary_parts.append(f"Potential social media presence: {', '.join(found_platforms)}")
+        else:
+            summary_parts.append("No confirmed social media profiles found via passive probing")
+        summary_parts.append(f"Generated {len(profile['combined_osint_queries'])} OSINT search queries")
+
+        profile["summary"] = " | ".join(summary_parts)
+
+        logger.info(f"✅ OSINT lookup complete: {profile['summary']}")
+        return profile
+
+
+# Initialize OSINT components
+osint_target_manager = OSINTTargetManager()
+osint_lookup_engine = OSINTLookupEngine()
+
+
+# ============================================================================
+# OSINT API ROUTES
+# ============================================================================
+
+@app.route("/api/osint/targets", methods=["POST"])
+def api_osint_add_target():
+    """Add a new OSINT target entity"""
+    try:
+        data = request.get_json()
+        name = data.get("name", "")
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+
+        target = osint_target_manager.add_target(
+            name=name,
+            phone=data.get("phone", ""),
+            email=data.get("email", ""),
+            aliases=data.get("aliases", []),
+            notes=data.get("notes", ""),
+            category=data.get("category", "person")
+        )
+        return jsonify({"success": True, "target": target})
+    except Exception as e:
+        logger.error(f"Error adding OSINT target: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/osint/targets", methods=["GET"])
+def api_osint_list_targets():
+    """List all OSINT targets"""
+    try:
+        targets = osint_target_manager.list_targets()
+        return jsonify({"success": True, "targets": targets, "count": len(targets)})
+    except Exception as e:
+        logger.error(f"Error listing OSINT targets: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/osint/targets/<target_id>", methods=["GET"])
+def api_osint_get_target(target_id):
+    """Get a specific OSINT target"""
+    try:
+        target = osint_target_manager.get_target(target_id)
+        if not target:
+            return jsonify({"error": "Target not found"}), 404
+        return jsonify({"success": True, "target": target})
+    except Exception as e:
+        logger.error(f"Error getting OSINT target: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/osint/targets/<target_id>", methods=["DELETE"])
+def api_osint_delete_target(target_id):
+    """Delete an OSINT target"""
+    try:
+        deleted = osint_target_manager.delete_target(target_id)
+        if not deleted:
+            return jsonify({"error": "Target not found"}), 404
+        return jsonify({"success": True, "message": "Target deleted"})
+    except Exception as e:
+        logger.error(f"Error deleting OSINT target: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/osint/lookup", methods=["POST"])
+def api_osint_lookup():
+    """Run an OSINT lookup on a name and/or phone number"""
+    try:
+        data = request.get_json()
+        name = data.get("name", "")
+        phone = data.get("phone", "")
+        target_id = data.get("target_id", "")
+
+        if not name and not phone:
+            return jsonify({"error": "At least one of 'name' or 'phone' is required"}), 400
+
+        # Run the lookup
+        results = osint_lookup_engine.full_lookup(name=name, phone=phone)
+
+        # If a target_id was provided, store results back on the target
+        if target_id:
+            osint_target_manager.update_lookup_results(target_id, results)
+
+        return jsonify({"success": True, "results": results})
+    except Exception as e:
+        logger.error(f"Error running OSINT lookup: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+
 # Create the banner after all classes are defined
 BANNER = ModernVisualEngine.create_banner()
 

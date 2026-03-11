@@ -5411,6 +5411,106 @@ def setup_mcp_server(hexstrike_client: HexStrikeClient) -> FastMCP:
 
         return result
 
+    # ========================================================================
+    # OSINT TARGET MANAGEMENT & LOOKUP TOOLS
+    # ========================================================================
+
+    @mcp.tool()
+    def osint_add_target(name: str, phone: str = "", email: str = "", notes: str = "") -> Dict[str, Any]:
+        """
+        Add a new OSINT target entity (person, organization) to the intelligence database.
+
+        Args:
+            name: Full name of the target (required)
+            phone: Phone number (any format)
+            email: Email address
+            notes: Additional notes about the target
+
+        Returns:
+            The created target entity with unique ID
+        """
+        data = {
+            "name": name,
+            "phone": phone,
+            "email": email,
+            "notes": notes,
+            "category": "person"
+        }
+        logger.info(f"{HexStrikeColors.CRIMSON}🎯 Adding OSINT target: {name}{HexStrikeColors.RESET}")
+        result = hexstrike_client.safe_post("api/osint/targets", data)
+
+        if result.get("success"):
+            target = result.get("target", {})
+            logger.info(f"{HexStrikeColors.SUCCESS}✅ Target added: {name} (ID: {target.get('id', 'N/A')}){HexStrikeColors.RESET}")
+        else:
+            logger.error(f"{HexStrikeColors.ERROR}❌ Failed to add OSINT target: {result.get('error', 'Unknown error')}{HexStrikeColors.RESET}")
+
+        return result
+
+    @mcp.tool()
+    def osint_list_targets() -> Dict[str, Any]:
+        """
+        List all OSINT target entities in the intelligence database.
+
+        Returns:
+            List of all registered targets with their details and lookup status
+        """
+        logger.info(f"{HexStrikeColors.CRIMSON}📋 Listing all OSINT targets{HexStrikeColors.RESET}")
+        result = hexstrike_client.safe_get("api/osint/targets")
+
+        if result.get("success"):
+            count = result.get("count", 0)
+            logger.info(f"{HexStrikeColors.SUCCESS}✅ Found {count} OSINT target(s){HexStrikeColors.RESET}")
+        else:
+            logger.error(f"{HexStrikeColors.ERROR}❌ Failed to list OSINT targets{HexStrikeColors.RESET}")
+
+        return result
+
+    @mcp.tool()
+    def osint_lookup(name: str = "", phone: str = "", target_id: str = "") -> Dict[str, Any]:
+        """
+        Run a comprehensive OSINT lookup on a person by name and/or phone number.
+        Performs phone intelligence analysis, social media probing, and generates
+        Google dorking queries for deeper investigation.
+
+        Args:
+            name: Full name of the person to investigate
+            phone: Phone number to analyze (any format)
+            target_id: Optional target ID to auto-store results on the target
+
+        Returns:
+            Complete OSINT intelligence profile with phone analysis,
+            social media presence, and investigation queries
+        """
+        data = {
+            "name": name,
+            "phone": phone,
+            "target_id": target_id
+        }
+        subject = name or phone or "Unknown"
+        logger.info(f"{HexStrikeColors.CRIMSON}🔍 Running OSINT lookup on: {subject}{HexStrikeColors.RESET}")
+        result = hexstrike_client.safe_post("api/osint/lookup", data)
+
+        if result.get("success"):
+            results = result.get("results", {})
+            summary = results.get("summary", "Lookup complete")
+            logger.info(f"{HexStrikeColors.SUCCESS}✅ OSINT lookup complete: {summary}{HexStrikeColors.RESET}")
+
+            # Log key findings
+            phone_intel = results.get("phone_intelligence", {})
+            if phone_intel.get("country", "Unknown") != "Unknown":
+                logger.info(f"  📱 Phone: {phone_intel['country']} ({phone_intel.get('carrier_guess', 'Unknown')})")
+
+            social_intel = results.get("social_media_intelligence", {})
+            probed = social_intel.get("probed_results", [])
+            found = [r["platform"] for r in probed if r.get("status") == "possibly_exists"]
+            if found:
+                logger.info(f"  🌐 Social media hits: {', '.join(found)}")
+        else:
+            logger.error(f"{HexStrikeColors.ERROR}❌ OSINT lookup failed: {result.get('error', 'Unknown')}{HexStrikeColors.RESET}")
+
+        return result
+
     return mcp
 
 def parse_args():
